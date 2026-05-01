@@ -1,0 +1,321 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ──────────────────────────────────────────────
+// Users & Authentication
+// ──────────────────────────────────────────────
+
+model User {
+  id                   String   @id @default(cuid())
+  email                String   @unique
+  emailPatternExtracted String  @default("{}") // JSON: { session, department, rollNumber }
+  isEmailVerified      Boolean  @default(false)
+  name                 String?
+  role                 String   @default("student") // student, cr, gr, admin
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  // Relations
+  createdClassrooms  Classroom[]       @relation("ClassroomCR")
+  grClassrooms       Classroom[]       @relation("ClassroomGR")
+  rosterEntries      RosterEntry[]
+  attendanceSessions AttendanceSession[]
+  attendanceRecords  AttendanceRecord[]
+  uploadedAssessments Assessment[]
+  studentResults     Result[]
+  studentFinalGrades StudentFinalGrade[]
+  announcements      Announcement[]
+  notes               Note[]
+  createdPolls        Poll[]
+  pollVotes           PollVote[]
+  comments            Comment[]
+  otpVerifications   EmailVerification[]
+  refreshToken       RefreshToken?
+}
+
+model EmailVerification {
+  id        String   @id @default(cuid())
+  userId    String
+  otpCode   String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ──────────────────────────────────────────────
+// Classroom & Roster Management
+// ──────────────────────────────────────────────
+
+model Classroom {
+  id           String   @id @default(cuid())
+  name         String
+  inviteCode   String   @unique
+  department   String   // "ce" or "cs"
+  sessionYear   String   // "2023"
+  semester      String   @default("1st") // "1st", "2nd", "3rd", ..., "8th" or custom labels like "Fall 2024"
+  semesterOrder Int      @default(1) // For sorting semesters chronologically
+  gradeConfig   String   @default("{\"A\":4.0,\"A-\":3.7,\"B+\":3.3,\"B\":3.0,\"B-\":2.7,\"C+\":2.3,\"C\":2.0,\"C-\":1.7,\"D\":1.0,\"F\":0.0}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  crId String
+  cr   User @relation("ClassroomCR", fields: [crId], references: [id])
+
+  grId String?
+  gr   User? @relation("ClassroomGR", fields: [grId], references: [id])
+
+  subjects            Subject[]
+  rosterEntries       RosterEntry[]
+  attendanceSessions  AttendanceSession[]
+  assessments         Assessment[]
+  studentFinalGrades  StudentFinalGrade[]
+  announcements       Announcement[]
+  notes                Note[]
+  polls                Poll[]
+  comments             Comment[]
+}
+
+model Subject {
+  id           String   @id @default(cuid())
+  classroomId  String
+  name         String
+  code         String
+  creditHours  Int      @default(3)
+  type         String   @default("theory") // theory, lab
+  teacherName  String?
+  scheduleDays String   @default("[]") // JSON array of ints: [1,3] = Mon,Wed
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  classroom          Classroom          @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  attendanceSessions AttendanceSession[]
+  assessments        Assessment[]
+  studentFinalGrades StudentFinalGrade[]
+}
+
+model RosterEntry {
+  id              String    @id @default(cuid())
+  classroomId     String
+  rollNumber      String    // Normalized: "45", "150", "8"
+  fullRollDisplay String    // Original: "2023-CE-045"
+  name            String
+  userId          String?
+  claimedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  user     User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([classroomId, rollNumber])
+}
+
+// ──────────────────────────────────────────────
+// Attendance System
+// ──────────────────────────────────────────────
+
+model AttendanceSession {
+  id            String   @id @default(cuid())
+  classroomId   String
+  subjectId     String
+  conductedDate String   // ISO date string "2026-04-15"
+  markedById    String
+  markerRole    String   // "cr" or "gr"
+  status        String   @default("draft") // draft, finalized
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  classroom Classroom   @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  subject   Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  markedBy  User        @relation(fields: [markedById], references: [id])
+  records   AttendanceRecord[]
+
+  @@unique([subjectId, conductedDate])
+}
+
+model AttendanceRecord {
+  id         String   @id @default(cuid())
+  sessionId  String
+  studentId  String
+  status     String   @default("present") // present, absent, late, excused
+  markedAt   DateTime @default(now())
+  syncStatus String   @default("synced") // pending, synced
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student User             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId])
+}
+
+// ──────────────────────────────────────────────
+// Results Management
+// ──────────────────────────────────────────────
+
+model Assessment {
+  id             String   @id @default(cuid())
+  classroomId    String
+  subjectId      String
+  type           String   // mid_term, quiz, assignment, sessional
+  name           String
+  totalMarks     Float
+  dateConducted  String?
+  uploadedById   String
+  uploaderRole   String   // "cr" or "gr"
+  isPublished    Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  classroom  Classroom  @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  subject    Subject    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  uploadedBy User       @relation(fields: [uploadedById], references: [id])
+  results    Result[]
+}
+
+model Result {
+  id            String   @id @default(cuid())
+  assessmentId  String
+  studentId     String
+  marksObtained Float?
+  grade         String?
+  remarks       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  student     User       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([assessmentId, studentId])
+}
+
+// ──────────────────────────────────────────────
+// Announcements
+// ──────────────────────────────────────────────
+
+model Announcement {
+  id          String   @id @default(cuid())
+  classroomId String
+  title       String
+  content     String
+  priority    String   @default("normal") // normal, important, urgent
+  postedById  String
+  posterRole  String   // "cr" or "gr"
+  isPinned    Boolean  @default(false)
+  imageUrl    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classroom  Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  postedBy   User     @relation(fields: [postedById], references: [id])
+}
+
+model StudentFinalGrade {
+  id           String   @id @default(cuid())
+  studentId    String
+  classroomId  String
+  subjectId    String
+  grade        String   // Letter grade from LMS
+  creditHours  Int
+  reportedAt   DateTime @default(now())
+  isVerified   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  student   User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  subject   Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, classroomId, subjectId])
+}
+
+// ──────────────────────────────────────────────
+// Classroom Notes
+// ──────────────────────────────────────────────
+
+model Note {
+  id          String   @id @default(cuid())
+  classroomId String
+  title       String
+  content     String
+  colorTag    String   @default("amber") // amber, teal, rose, emerald, violet
+  isPinned    Boolean  @default(false)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  createdBy  User      @relation(fields: [createdById], references: [id])
+}
+
+// ──────────────────────────────────────────────
+// Classroom Polls
+// ──────────────────────────────────────────────
+
+model Poll {
+  id          String   @id @default(cuid())
+  classroomId String
+  question    String
+  options     String   @default("[]") // JSON array: ["Yes", "No"]
+  type        String   @default("single") // single, multiple
+  deadline    DateTime?
+  isClosed    Boolean  @default(false)
+  createdById String
+  creatorRole String   @default("cr") // cr, gr
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  createdBy  User      @relation(fields: [createdById], references: [id])
+  votes      PollVote[]
+}
+
+model PollVote {
+  id        String   @id @default(cuid())
+  pollId    String
+  userId    String
+  selectedOption String // JSON array for multiple: "[0,2]" or single: "0"
+  createdAt DateTime @default(now())
+
+  poll  Poll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  user  User @relation(fields: [userId], references: [id])
+
+  @@unique([pollId, userId])
+}
+
+// ──────────────────────────────────────────────
+// Classroom Comments / Discussion
+// ──────────────────────────────────────────────
+
+model Comment {
+  id          String   @id @default(cuid())
+  classroomId String
+  content     String
+  parentId    String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  createdBy   User      @relation(fields: [createdById], references: [id])
+  parent      Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Comment[] @relation("CommentReplies")
+}
